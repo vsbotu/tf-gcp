@@ -4,6 +4,10 @@
 #
 # Your WIF attribute condition only allows refs/heads/main — runs from other branches
 # (including "Run workflow" on a non-main branch) will fail at the auth step.
+#
+# OIDC audience: If the WIF provider lists "Allowed audiences" (e.g. https://github.com/OWNER),
+# set GCP_WIF_AUDIENCE to that exact value. If the provider has no custom audiences, use the
+# default (omit audience) or set it to the full provider resource URL — see docs.
 
 name: Validate GCP connection
 
@@ -22,6 +26,9 @@ env:
   GCP_PROJECT_ID: terraform-vsbotu
   GCP_WIF_PROVIDER: projects/935459376295/locations/global/workloadIdentityPools/github-pool/providers/github
   GCP_SA_EMAIL: sa-github-terraform@terraform-vsbotu.iam.gserviceaccount.com
+  # Must match an entry under the OIDC provider’s "Allowed audiences" in GCP (often https://github.com/OWNER).
+  # Fixes: invalid_grant — audience in ID Token does not match the expected audience.
+  GCP_WIF_AUDIENCE: https://github.com/vsbotu
 
 jobs:
   validate:
@@ -36,6 +43,7 @@ jobs:
         with:
           workload_identity_provider: ${{ env.GCP_WIF_PROVIDER }}
           service_account: ${{ env.GCP_SA_EMAIL }}
+          audience: ${{ env.GCP_WIF_AUDIENCE }}
 
       - name: Set up Cloud SDK
         uses: google-github-actions/setup-gcloud@v2

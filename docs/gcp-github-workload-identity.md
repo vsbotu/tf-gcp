@@ -385,5 +385,6 @@ projects/935459376295/locations/global/workloadIdentityPools/github-pool/provide
 |-------|----------------|
 | `create` fails: already exists | Resource was created earlier (console or script). List/describe instead of create. |
 | GitHub Actions auth fails | `permissions: id-token: write`; provider ID path matches **§11.9**; condition matches branch/repo. |
+| **`invalid_grant` — audience does not match** | The OIDC token’s `aud` must match **Allowed audiences** on the WIF OIDC provider. If you set e.g. `https://github.com/OWNER` in GCP, set the same value as `audience` in `google-github-actions/auth` (see `.github/workflows/validate-gcp-connection.yml`). If you use **no** custom audiences in GCP, either omit `audience` in the workflow or allow the full provider URL in GCP. |
 | Permission denied on GCP | SA needs roles on the **project** (**§11.4**); impersonation needs **§11.7**. |
 | Wrong project number in `principalSet` | Re-run **§11.1** and **§11.7** with `echo $PROJECT_NUMBER`. |
