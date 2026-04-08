@@ -1,0 +1,74 @@
+# Validates GitHub Actions → GCP authentication via Workload Identity Federation.
+# Requires: pool + OIDC provider + SA with Workload Identity User (see docs/gcp-github-workload-identity.md).
+# If your OIDC provider ID in GCP is not "github", update GCP_WIF_PROVIDER below.
+#
+# Your WIF attribute condition only allows refs/heads/main — runs from other branches
+# (including "Run workflow" on a non-main branch) will fail at the auth step.
+
+name: Validate GCP connection
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/validate-gcp-connection.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  GCP_PROJECT_ID: terraform-vsbotu
+  GCP_WIF_PROVIDER: projects/935459376295/locations/global/workloadIdentityPools/github-pool/providers/github
+  GCP_SA_EMAIL: sa-github-terraform@terraform-vsbotu.iam.gserviceaccount.com
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WIF_PROVIDER }}
+          service_account: ${{ env.GCP_SA_EMAIL }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Validate active identity
+        run: |
+          set -euo pipefail
+          echo "=== Active gcloud account (expect service account) ==="
+          gcloud auth list --filter=status:ACTIVE --format="table(account,status)"
+
+      - name: Validate default project
+        run: |
+          set -euo pipefail
+          echo "=== Default project ==="
+          gcloud config get-value project
+
+      - name: Validate project access (read)
+        run: |
+          set -euo pipefail
+          echo "=== Project describe (requires resourcemanager.projects.get) ==="
+          gcloud projects describe "${{ env.GCP_PROJECT_ID }}" \
+            --format="table(projectId,name,projectNumber)"
+
+      - name: Validate API access (enabled services sample)
+        run: |
+          set -euo pipefail
+          echo "=== Sample of enabled services (proves API calls work) ==="
+          gcloud services list --enabled --project="${{ env.GCP_PROJECT_ID }}" --limit=5 \
+            --format="table(config.name)"
+
+      - name: Summary
+        if: success()
+        run: |
+          echo "GCP connection check passed for project ${{ env.GCP_PROJECT_ID }} as ${{ env.GCP_SA_EMAIL }}."
