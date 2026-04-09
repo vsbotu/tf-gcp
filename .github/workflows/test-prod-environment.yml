@@ -1,15 +1,24 @@
 # Tests GitHub Environment "prod": required reviewers + wait timer + branch rules.
 # Expected: job "pre-check" runs immediately; "deploy-to-prod" shows "Waiting for approval"
 # until a reviewer approves (and any wait timer elapses per your environment settings).
+#
+# Triggers:
+#   - workflow_dispatch: Actions → Test prod environment → Run workflow (manual).
+#   - push to branch main (any path).
 
 name: Test prod environment
 
 on:
   workflow_dispatch:
+    inputs:
+      note:
+        description: "Optional note for this manual run (shown in deploy job)"
+        required: false
+        default: ""
+        type: string
+
   push:
     branches: [main]
-    paths:
-      - ".github/workflows/test-prod-environment.yml"
 
 permissions:
   contents: read
@@ -18,11 +27,14 @@ jobs:
   pre-check:
     name: Pre-check (no approval)
     runs-on: ubuntu-latest
+    env:
+      MANUAL_NOTE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.note || '' }}
     steps:
       - name: Immediate step
         run: |
           echo "This job runs without environment protection."
-          echo "ref=${GITHUB_REF} sha=${GITHUB_SHA}"
+          echo "trigger=${{ github.event_name }} ref=${GITHUB_REF} sha=${GITHUB_SHA}"
+          if [ -n "${MANUAL_NOTE}" ]; then echo "Manual deployment note: ${MANUAL_NOTE}"; fi
 
   deploy-to-prod:
     name: Deploy to prod (requires approval)
@@ -31,7 +43,12 @@ jobs:
     environment: prod
     steps:
       - name: Post-approval step
+        env:
+          # Only set for workflow_dispatch; empty on push.
+          MANUAL_NOTE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.note || '' }}
         run: |
           echo "Environment: prod — protection rules were satisfied."
           echo "If you see this, reviewers approved (and timers passed, if configured)."
           echo "Actor: ${GITHUB_ACTOR}"
+          echo "Trigger: ${{ github.event_name }}"
+          if [ -n "${MANUAL_NOTE}" ]; then echo "Manual deployment note: ${MANUAL_NOTE}"; fi
