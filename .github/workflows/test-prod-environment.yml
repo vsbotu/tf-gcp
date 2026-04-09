@@ -1,0 +1,37 @@
+# Tests GitHub Environment "prod": required reviewers + wait timer + branch rules.
+# Expected: job "pre-check" runs immediately; "deploy-to-prod" shows "Waiting for approval"
+# until a reviewer approves (and any wait timer elapses per your environment settings).
+
+name: Test prod environment
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/test-prod-environment.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  pre-check:
+    name: Pre-check (no approval)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Immediate step
+        run: |
+          echo "This job runs without environment protection."
+          echo "ref=${GITHUB_REF} sha=${GITHUB_SHA}"
+
+  deploy-to-prod:
+    name: Deploy to prod (requires approval)
+    needs: [pre-check]
+    runs-on: ubuntu-latest
+    environment: prod
+    steps:
+      - name: Post-approval step
+        run: |
+          echo "Environment: prod — protection rules were satisfied."
+          echo "If you see this, reviewers approved (and timers passed, if configured)."
+          echo "Actor: ${GITHUB_ACTOR}"
