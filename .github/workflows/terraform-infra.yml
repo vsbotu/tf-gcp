@@ -1,17 +1,16 @@
-# Terraform: fmt, init, validate, plan, apply (manual only).
-# Requires GitHub repo variables (or organization variables) for GCP WIF — same pattern as validate-gcp-connection.yml.
+# Terraform: fmt, init, validate, then plan / apply / destroy (manual only).
+# Requires GitHub repo variables for GCP WIF — same pattern as validate-gcp-connection.yml.
 # Ensure your WIF attribute condition allows this repo/ref (e.g. workflow_dispatch from main).
 #
 # STATE WARNING: The default Terraform backend is local. GitHub-hosted runners do NOT persist
-# terraform.tfstate between workflow runs. A second "apply" from CI will look like an empty state
-# and can try to recreate existing resources (errors / conflicts). Before relying on repeated
-# applies, add a remote backend (e.g. GCS) in infra/ and migrate state.
+# terraform.tfstate between workflow runs. Without a remote backend (e.g. GCS), "apply" and
+# "destroy" in CI only see state from that single job (often empty unless you upload state).
 #
 # Set these in: Settings → Secrets and variables → Actions → Variables (recommended):
 #   GCP_PROJECT_ID
-#   GCP_WIF_PROVIDER   (full resource name of the WIF provider)
-#   GCP_SA_EMAIL       (service account to impersonate)
-#   GCP_WIF_AUDIENCE   (must match OIDC provider "Allowed audiences", often https://github.com/OWNER)
+#   GCP_WIF_PROVIDER
+#   GCP_SA_EMAIL
+#   GCP_WIF_AUDIENCE
 #
 # IAM: the service account needs roles to enable APIs, manage VPC, and manage GKE (e.g. Editor for labs, or narrower).
 
@@ -20,10 +19,14 @@ name: Terraform infra (GKE)
 on:
   workflow_dispatch:
     inputs:
-      run_apply:
-        description: "Run terraform apply after plan (uncheck for plan-only)"
-        type: boolean
-        default: true
+      terraform_action:
+        description: "plan = dry-run; apply = create/update; destroy = delete managed resources"
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+        default: plan
 
 permissions:
   contents: read
@@ -86,10 +89,28 @@ jobs:
       - name: Terraform validate
         run: terraform validate
 
-      - name: Terraform plan
+      - name: Terraform plan (no apply)
+        if: github.event.inputs.terraform_action == 'plan'
+        run: terraform plan -input=false -no-color
+
+      - name: Terraform plan (apply)
+        if: github.event.inputs.terraform_action == 'apply'
         run: terraform plan -input=false -no-color -out=tfplan
 
       - name: Terraform apply
-        # workflow_dispatch booleans are strings ('true' / 'false')
-        if: ${{ github.event.inputs.run_apply != 'false' }}
+        if: github.event.inputs.terraform_action == 'apply'
         run: terraform apply -input=false -no-color -auto-approve tfplan
+
+      - name: Confirm destroy
+        if: github.event.inputs.terraform_action == 'destroy'
+        run: |
+          echo "::warning::Running terraform destroy — this deletes resources managed by this configuration."
+          echo "Action selected: destroy"
+
+      - name: Terraform plan (destroy)
+        if: github.event.inputs.terraform_action == 'destroy'
+        run: terraform plan -destroy -input=false -no-color -out=tfplan-destroy
+
+      - name: Terraform apply (destroy)
+        if: github.event.inputs.terraform_action == 'destroy'
+        run: terraform apply -input=false -no-color -auto-approve tfplan-destroy
