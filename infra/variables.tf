@@ -60,7 +60,7 @@ variable "services_ip_cidr_range" {
 variable "cluster_name" {
   type        = string
   description = "GKE cluster name."
-  default     = "gke-us-east1"
+  default     = "gke-us-east1-demo"
 }
 
 variable "release_channel" {
