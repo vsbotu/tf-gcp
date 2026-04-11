@@ -1,0 +1,10 @@
+Release: {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+
+Service type: {{ .Values.service.type }}
+
+For ClusterIP, port-forward to test locally:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "nginx-sample.fullname" . }} 8080:{{ .Values.service.port }}
+  curl -s http://127.0.0.1:8080/ | head -5
+
+Or expose with Gateway API / Ingress separately.

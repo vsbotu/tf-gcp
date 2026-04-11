@@ -1,0 +1,14 @@
+# Environment / app-specific overrides for chart deploy/helm/nginx-sample
+# Install: helm upgrade --install <release> ./deploy/helm/nginx-sample -f app/nginx/values.yaml -n <ns>
+
+replicaCount: 2
+
+image:
+  repository: nginx
+  tag: "1.25"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 80

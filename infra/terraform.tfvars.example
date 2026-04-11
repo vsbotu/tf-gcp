@@ -1,0 +1,14 @@
+# Copy to terraform.tfvars and set project_id.
+# cp terraform.tfvars.example terraform.tfvars
+
+project_id = "your-gcp-project-id"
+
+# Defaults use *-demo names: gke-vpc-demo, gke-vpc-demo-us-east1, gke-us-east1-demo
+# Optional overrides:
+# region        = "us-east1"
+# zone          = "us-east1-b"
+# network_name  = "gke-vpc-demo"
+# subnet_name   = "gke-vpc-demo-us-east1"
+# cluster_name  = "gke-us-east1-demo"
+# node_count    = 2
+# machine_type  = "e2-medium"

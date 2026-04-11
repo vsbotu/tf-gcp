@@ -18,13 +18,13 @@ variable "zone" {
 variable "network_name" {
   type        = string
   description = "Name of the custom VPC."
-  default     = "gke-vpc"
+  default     = "gke-vpc-demo"
 }
 
 variable "subnet_name" {
   type        = string
   description = "Name of the GKE subnet."
-  default     = "gke-vpc-us-east1"
+  default     = "gke-vpc-demo-us-east1"
 }
 
 variable "subnet_ip_cidr_range" {

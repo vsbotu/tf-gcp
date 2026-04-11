@@ -1,0 +1,94 @@
+# Deploy Helm chart deploy/helm/nginx-sample using app/nginx/values.yaml
+# Auth: Workload Identity Federation (same variables as terraform-infra / validate-gcp-connection)
+
+name: Helm deploy (nginx-sample)
+
+on:
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: "Kubernetes namespace (created if missing)"
+        type: string
+        default: "demo"
+      release_name:
+        description: "Helm release name"
+        type: string
+        default: "nginx-sample"
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  CHART_PATH: deploy/helm/nginx-sample
+  VALUES_FILE: app/nginx/values.yaml
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check required variables (WIF + project)
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -z "${{ vars.GCP_PROJECT_ID }}" ] && missing+=(GCP_PROJECT_ID)
+          [ -z "${{ vars.GCP_WIF_PROVIDER }}" ] && missing+=(GCP_WIF_PROVIDER)
+          [ -z "${{ vars.GCP_SA_EMAIL }}" ] && missing+=(GCP_SA_EMAIL)
+          [ -z "${{ vars.GCP_WIF_AUDIENCE }}" ] && missing+=(GCP_WIF_AUDIENCE)
+          if [ "${#missing[@]}" -ne 0 ]; then
+            echo "Missing GitHub Actions variables: ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SA_EMAIL }}
+          audience: ${{ vars.GCP_WIF_AUDIENCE }}
+
+      - name: Set up gcloud and kubectl
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: "gke-gcloud-auth-plugin"
+
+      - name: Get GKE credentials
+        env:
+          CLUSTER: ${{ vars.GKE_CLUSTER_NAME }}
+          ZONE: ${{ vars.GKE_ZONE }}
+        run: |
+          set -euo pipefail
+          # Optional repo vars; defaults match Terraform defaults (gke-us-east1-demo, us-east1-b)
+          CLUSTER="${CLUSTER:-gke-us-east1-demo}"
+          ZONE="${ZONE:-us-east1-b}"
+          echo "Using cluster=$CLUSTER zone=$ZONE"
+          gcloud container clusters get-credentials "$CLUSTER" \
+            --zone "$ZONE" \
+            --project "${{ vars.GCP_PROJECT_ID }}"
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "v3.14.4"
+
+      - name: Helm lint
+        run: helm lint "${{ env.CHART_PATH }}" -f "${{ env.VALUES_FILE }}"
+
+      - name: Helm template (dry-run render)
+        run: helm template "${{ inputs.release_name }}" "${{ env.CHART_PATH }}" -f "${{ env.VALUES_FILE }}" -n "${{ inputs.namespace }}" --debug > /tmp/rendered.yaml && head -80 /tmp/rendered.yaml
+
+      - name: Helm upgrade --install
+        run: |
+          kubectl create namespace "${{ inputs.namespace }}" --dry-run=client -o yaml | kubectl apply -f -
+          helm upgrade --install "${{ inputs.release_name }}" "${{ env.CHART_PATH }}" \
+            -f "${{ env.VALUES_FILE }}" \
+            -n "${{ inputs.namespace }}" \
+            --wait \
+            --timeout 5m
+
+      - name: Verify
+        run: |
+          kubectl get deploy,svc,pods -n "${{ inputs.namespace }}" -l "app.kubernetes.io/instance=${{ inputs.release_name }}"
