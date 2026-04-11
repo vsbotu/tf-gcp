@@ -13,7 +13,7 @@ name: Validate GCP connection
 
 on:
   push:
-    branches: [main]
+    branches: [develop]
     paths:
       - ".github/workflows/validate-gcp-connection.yml"
   workflow_dispatch:

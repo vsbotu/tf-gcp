@@ -18,7 +18,7 @@ on:
         type: string
 
   push:
-    branches: [main]
+    branches: [develop]
 
 permissions:
   contents: read

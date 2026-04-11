@@ -1,0 +1,95 @@
+# Terraform: fmt, init, validate, plan, apply (manual only).
+# Requires GitHub repo variables (or organization variables) for GCP WIF — same pattern as validate-gcp-connection.yml.
+# Ensure your WIF attribute condition allows this repo/ref (e.g. workflow_dispatch from main).
+#
+# STATE WARNING: The default Terraform backend is local. GitHub-hosted runners do NOT persist
+# terraform.tfstate between workflow runs. A second "apply" from CI will look like an empty state
+# and can try to recreate existing resources (errors / conflicts). Before relying on repeated
+# applies, add a remote backend (e.g. GCS) in infra/ and migrate state.
+#
+# Set these in: Settings → Secrets and variables → Actions → Variables (recommended):
+#   GCP_PROJECT_ID
+#   GCP_WIF_PROVIDER   (full resource name of the WIF provider)
+#   GCP_SA_EMAIL       (service account to impersonate)
+#   GCP_WIF_AUDIENCE   (must match OIDC provider "Allowed audiences", often https://github.com/OWNER)
+#
+# IAM: the service account needs roles to enable APIs, manage VPC, and manage GKE (e.g. Editor for labs, or narrower).
+
+name: Terraform infra (GKE)
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_apply:
+        description: "Run terraform apply after plan (uncheck for plan-only)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: terraform-infra-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  TF_IN_AUTOMATION: true
+  TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
+  WORKING_DIRECTORY: infra
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check required variables
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -z "${{ vars.GCP_PROJECT_ID }}" ] && missing+=(GCP_PROJECT_ID)
+          [ -z "${{ vars.GCP_WIF_PROVIDER }}" ] && missing+=(GCP_WIF_PROVIDER)
+          [ -z "${{ vars.GCP_SA_EMAIL }}" ] && missing+=(GCP_SA_EMAIL)
+          [ -z "${{ vars.GCP_WIF_AUDIENCE }}" ] && missing+=(GCP_WIF_AUDIENCE)
+          if [ "${#missing[@]}" -ne 0 ]; then
+            echo "Missing GitHub Actions variables: ${missing[*]}"
+            echo "Configure them under Settings → Secrets and variables → Actions → Variables."
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SA_EMAIL }}
+          audience: ${{ vars.GCP_WIF_AUDIENCE }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.0"
+          terraform_wrapper: false
+
+      - name: Terraform fmt (check)
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Terraform validate
+        run: terraform validate
+
+      - name: Terraform plan
+        run: terraform plan -input=false -no-color -out=tfplan
+
+      - name: Terraform apply
+        # workflow_dispatch booleans are strings ('true' / 'false')
+        if: ${{ github.event.inputs.run_apply != 'false' }}
+        run: terraform apply -input=false -no-color -auto-approve tfplan
