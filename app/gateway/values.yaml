@@ -1,0 +1,18 @@
+# HTTPRoutes Helm chart: bootstrap/http-routes
+# Shared Gateway: kubectl apply -f bootstrap/gateway.yaml (once per cluster/namespace)
+#
+# helm upgrade --install http-routes ./bootstrap/http-routes -f app/gateway/values.yaml -n demo
+
+namespace: demo
+
+gatewayRef:
+  name: external-http
+  namespace: demo
+  sectionName: http
+
+httpRoutes:
+  - name: nginx-root
+    rules:
+      - pathPrefix: /
+        serviceName: nginx-sample
+        servicePort: 80

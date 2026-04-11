@@ -1,0 +1,16 @@
+# HTTPRoutes only — Gateway lives in bootstrap/gateway.yaml (apply separately).
+
+namespace: demo
+
+# Must match bootstrap/gateway.yaml (parentRefs)
+gatewayRef:
+  name: external-http
+  namespace: demo
+  sectionName: http
+
+httpRoutes:
+  - name: example-route
+    rules:
+      - pathPrefix: /
+        serviceName: nginx-sample
+        servicePort: 80

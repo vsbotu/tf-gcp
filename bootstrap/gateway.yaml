@@ -1,0 +1,20 @@
+# Shared Gateway for all apps (apply once; not Helm-managed).
+# Multiple HTTPRoutes (Helm or raw YAML) attach to this Gateway via parentRefs.
+#
+# Apply: kubectl apply -f bootstrap/gateway.yaml
+# Edit namespace/metadata.name if needed (must match HTTPRoute parentRefs + allowedRoutes).
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: external-http
+  namespace: demo
+spec:
+  gatewayClassName: gke-l7-global-external-managed
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: Same

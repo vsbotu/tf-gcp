@@ -1,0 +1,109 @@
+# 1) Apply shared Gateway: bootstrap/gateway.yaml (plain manifest, common LB for all apps)
+# 2) Helm: bootstrap/http-routes — HTTPRoutes only (same Gateway via parentRefs)
+#
+# Requires: GKE + Gateway API; backend Services before routes resolve (e.g. helm-deploy-nginx)
+
+name: Bootstrap Gateway (HTTPRoute)
+
+on:
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: "Namespace (must match bootstrap/gateway.yaml and values)"
+        type: string
+        default: "demo"
+      release_name:
+        description: "Helm release name for http-routes chart"
+        type: string
+        default: "http-routes"
+      apply_gateway:
+        description: "Run kubectl apply -f bootstrap/gateway.yaml (uncheck if Gateway already exists)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  GATEWAY_MANIFEST: bootstrap/gateway.yaml
+  CHART_PATH: bootstrap/http-routes
+  VALUES_FILE: app/gateway/values.yaml
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check required variables (WIF + project)
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -z "${{ vars.GCP_PROJECT_ID }}" ] && missing+=(GCP_PROJECT_ID)
+          [ -z "${{ vars.GCP_WIF_PROVIDER }}" ] && missing+=(GCP_WIF_PROVIDER)
+          [ -z "${{ vars.GCP_SA_EMAIL }}" ] && missing+=(GCP_SA_EMAIL)
+          [ -z "${{ vars.GCP_WIF_AUDIENCE }}" ] && missing+=(GCP_WIF_AUDIENCE)
+          if [ "${#missing[@]}" -ne 0 ]; then
+            echo "Missing GitHub Actions variables: ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SA_EMAIL }}
+          audience: ${{ vars.GCP_WIF_AUDIENCE }}
+
+      - name: Set up gcloud and kubectl
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: "gke-gcloud-auth-plugin"
+
+      - name: Get GKE credentials
+        env:
+          CLUSTER: ${{ vars.GKE_CLUSTER_NAME }}
+          ZONE: ${{ vars.GKE_ZONE }}
+        run: |
+          set -euo pipefail
+          CLUSTER="${CLUSTER:-gke-us-east1-demo}"
+          ZONE="${ZONE:-us-east1-b}"
+          echo "Using cluster=$CLUSTER zone=$ZONE"
+          gcloud container clusters get-credentials "$CLUSTER" \
+            --zone "$ZONE" \
+            --project "${{ vars.GCP_PROJECT_ID }}"
+
+      - name: Verify Gateway API
+        run: kubectl get gatewayclass
+
+      - name: Ensure namespace
+        run: |
+          kubectl create namespace "${{ inputs.namespace }}" --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Apply shared Gateway (static manifest)
+        if: ${{ inputs.apply_gateway == true || inputs.apply_gateway == 'true' }}
+        run: kubectl apply -f "${{ env.GATEWAY_MANIFEST }}"
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "v3.14.4"
+
+      - name: Helm lint (HTTPRoutes only)
+        run: helm lint "${{ env.CHART_PATH }}" -f "${{ env.VALUES_FILE }}"
+
+      - name: Helm template (preview)
+        run: helm template "${{ inputs.release_name }}" "${{ env.CHART_PATH }}" -f "${{ env.VALUES_FILE }}" -n "${{ inputs.namespace }}" | head -120
+
+      - name: Helm upgrade --install (HTTPRoutes)
+        run: |
+          helm upgrade --install "${{ inputs.release_name }}" "${{ env.CHART_PATH }}" \
+            -f "${{ env.VALUES_FILE }}" \
+            -n "${{ inputs.namespace }}"
+
+      - name: Verify Gateway / HTTPRoute
+        run: |
+          kubectl get gateway,httproute -n "${{ inputs.namespace }}"
+          kubectl describe gateway external-http -n "${{ inputs.namespace }}" | tail -25

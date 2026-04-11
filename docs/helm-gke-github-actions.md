@@ -163,9 +163,15 @@ The **GitHub Actions service account** must be able to:
 
 ---
 
-## 10. Optional next steps (not in this chart)
+## 10. Gateway + HTTPRoutes (separate)
 
-- **Gateway API**: add **`HTTPRoute` + `Gateway`** templates or a second chart; requires **GatewayClass** on the cluster.
+After the **nginx** chart deploys a **Service**, apply the **shared** **`Gateway`** once: **`kubectl apply -f bootstrap/gateway.yaml`**. Then install **`bootstrap/http-routes`** with **`app/gateway/values.yaml`** to create **`HTTPRoute`** rows that attach to that Gateway. See **[bootstrap-gateway.md](bootstrap-gateway.md)** and workflow **`bootstrap-gateway.yml`**.
+
+---
+
+## 11. Optional next steps
+
+- **TLS / HTTPS** on the Gateway listener (Certificate Manager / cert refs).
 - **Remote Terraform state** (GCS backend) so CI **Terraform** and **Helm** align with shared infrastructure lifecycle.
 
 ---

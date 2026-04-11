@@ -1,0 +1,6 @@
+apiVersion: v2
+name: http-routes
+description: HTTPRoute resources pointing at the shared Gateway (bootstrap/gateway.yaml)
+type: application
+version: 0.1.0
+appVersion: "1.0"

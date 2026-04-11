@@ -1,0 +1,4 @@
+HTTPRoutes reference Gateway: {{ .Values.gatewayRef.namespace }}/{{ .Values.gatewayRef.name }} (listener {{ .Values.gatewayRef.sectionName }})
+Routes defined: {{ len .Values.httpRoutes }}
+
+Ensure bootstrap/gateway.yaml is applied first.
