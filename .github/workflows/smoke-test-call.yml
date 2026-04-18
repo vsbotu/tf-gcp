@@ -1,8 +1,5 @@
-# Standalone: calls vsbotu/smoketest reusable workflow only.
-# Smoketest workflow_call must define input `fail` (boolean) — see that repo's smoke-test.yml.
-#
-# If "workflow was not found": org must allow this repo to use reusable workflows from smoketest
-# (Settings → Actions → General → Fork pull request workflows / access to reusable workflows).
+# Thin dispatcher: runs vsbotu/smoketest reusable workflow only.
+# Private repo: org Actions must allow tf-gcp to use reusable workflows from smoketest, or parse fails with "workflow was not found".
 
 name: Smoke test (call smoketest repo)
 
@@ -16,8 +13,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
-  actions: write
 
 jobs:
   smoke:
