@@ -1,10 +1,9 @@
 # Calls reusable workflows [.github/workflows/helm-deploy-nginx1.yml] and
 # [helm-deploy-nginx2.yml] (parallel), then smoke tests.
 #
-# Why "smoke-tests" stays green when smoke fails: GitHub only publishes job outputs if the job
-# succeeds. Downstream rollback jobs need needs_rollback from smoke-tests, so that job must not
-# fail. Overall pass/fail is decided by "workflow-result" (green if smoke OK, or smoke failed and
-# rollback job succeeded).
+# Smoke failure marks the smoke-tests job failed (red). Rollback intent is passed via artifact
+# smoke-meta.json + job "evaluate-rollback" (GitHub does not expose outputs from failed jobs).
+# workflow-result: green if smoke passed, or smoke failed and rollback succeeded; red otherwise.
 #
 # On smoke failure: optional manual approval (GitHub Environment), then Helm rollback.
 #
@@ -40,6 +39,7 @@ on:
 permissions:
   contents: read
   id-token: write
+  actions: write # upload-artifact (smoke-meta for evaluate-rollback)
 
 env:
   RELEASE_1: nginx1
@@ -59,8 +59,6 @@ jobs:
   smoke-tests:
     needs: [nginx1, nginx2]
     runs-on: ubuntu-latest
-    outputs:
-      needs_rollback: ${{ steps.smoke.outputs.needs_rollback }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -149,20 +147,58 @@ jobs:
             NEEDS_ROLLBACK=true
           fi
 
-          echo "needs_rollback=$NEEDS_ROLLBACK" >> "$GITHUB_OUTPUT"
+          # Written before exit so upload-artifact can pass intent to evaluate-rollback (failed jobs have no outputs).
+          printf '{"needs_rollback":"%s","namespace":"%s"}\n' "$NEEDS_ROLLBACK" "$NS" > smoke-meta.json
 
           if [ "$NEEDS_ROLLBACK" = "true" ]; then
-            echo "::error::Smoke tests failed (or simulated). Approve the 'helm-rollback' environment to run Helm rollback, or use skip_rollback_approval."
-            echo "::notice::This job stays success so rollback inputs are published; workflow result is set in job workflow-result."
-          else
-            echo "=== OK: smoke passed ==="
-            kubectl get deploy,svc,pods -n "$NS" \
-              -l "app.kubernetes.io/instance in (${{ env.RELEASE_1 }},${{ env.RELEASE_2 }})"
+            echo "::error::Smoke tests failed (or simulated). After approval, rollback will run. Overall status is decided in workflow-result."
+            exit 1
           fi
 
-  rollback-after-approval:
+          echo "=== OK: smoke passed ==="
+          kubectl get deploy,svc,pods -n "$NS" \
+            -l "app.kubernetes.io/instance in (${{ env.RELEASE_1 }},${{ env.RELEASE_2 }})"
+
+      - name: Upload smoke metadata for rollback jobs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-meta
+          path: smoke-meta.json
+          if-no-files-found: warn
+
+  evaluate-rollback:
+    name: Evaluate rollback
     needs: [nginx1, nginx2, smoke-tests]
-    if: needs.smoke-tests.outputs.needs_rollback == 'true' && inputs.skip_rollback_approval == false
+    if: always()
+    runs-on: ubuntu-latest
+    outputs:
+      needs_rollback: ${{ steps.parse.outputs.needs_rollback }}
+    steps:
+      - name: Download smoke metadata
+        id: dl
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: smoke-meta
+          path: .
+
+      - name: Parse smoke metadata
+        id: parse
+        run: |
+          set -euo pipefail
+          if [ ! -f smoke-meta.json ]; then
+            echo "needs_rollback=false" >> "$GITHUB_OUTPUT"
+            echo "No smoke-meta.json (smoke job failed before writing metadata, or upload missing)"
+            exit 0
+          fi
+          NEEDS=$(jq -r .needs_rollback smoke-meta.json)
+          echo "needs_rollback=$NEEDS" >> "$GITHUB_OUTPUT"
+          echo "Parsed needs_rollback=$NEEDS"
+
+  rollback-after-approval:
+    needs: [nginx1, nginx2, evaluate-rollback]
+    if: needs.evaluate-rollback.outputs.needs_rollback == 'true' && inputs.skip_rollback_approval == false
     environment: helm-rollback
     runs-on: ubuntu-latest
     steps:
@@ -246,8 +282,8 @@ jobs:
           exit "$ERR"
 
   rollback-immediate:
-    needs: [nginx1, nginx2, smoke-tests]
-    if: needs.smoke-tests.outputs.needs_rollback == 'true' && inputs.skip_rollback_approval == true
+    needs: [nginx1, nginx2, evaluate-rollback]
+    if: needs.evaluate-rollback.outputs.needs_rollback == 'true' && inputs.skip_rollback_approval == true
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -331,7 +367,7 @@ jobs:
 
   workflow-result:
     name: Workflow result
-    needs: [smoke-tests, rollback-after-approval, rollback-immediate]
+    needs: [smoke-tests, evaluate-rollback, rollback-after-approval, rollback-immediate]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -339,27 +375,39 @@ jobs:
         run: |
           set -euo pipefail
           SMOKE_JOB="${{ needs.smoke-tests.result }}"
+          EVAL_RB="${{ needs.evaluate-rollback.outputs.needs_rollback }}"
           RB_A="${{ needs.rollback-after-approval.result }}"
           RB_I="${{ needs.rollback-immediate.result }}"
-
-          if [ "$SMOKE_JOB" = "failure" ] || [ "$SMOKE_JOB" = "cancelled" ]; then
-            echo "::error::smoke-tests job did not complete successfully — check logs"
-            exit 1
-          fi
 
           if [ "$SMOKE_JOB" = "skipped" ]; then
             echo "::error::smoke-tests was skipped — check nginx deploy jobs"
             exit 1
           fi
 
-          NEEDS_RB="${{ needs.smoke-tests.outputs.needs_rollback }}"
-          if [ "$NEEDS_RB" != "true" ]; then
+          if [ "$SMOKE_JOB" = "cancelled" ]; then
+            echo "::error::smoke-tests was cancelled"
+            exit 1
+          fi
+
+          # Smoke passed — overall green (rollback jobs are skipped).
+          if [ "$SMOKE_JOB" = "success" ]; then
             echo "Smoke passed — workflow OK"
             exit 0
           fi
 
+          # smoke-tests failed (expected when rollback path is taken).
+          if [ "$SMOKE_JOB" != "failure" ]; then
+            echo "::error::Unexpected smoke-tests result: $SMOKE_JOB"
+            exit 1
+          fi
+
+          if [ "$EVAL_RB" != "true" ]; then
+            echo "::error::Smoke or setup failed without a rollback path (no rollback candidate). Check smoke-tests logs."
+            exit 1
+          fi
+
           if [ "$RB_A" = "success" ] || [ "$RB_I" = "success" ]; then
-            echo "Rollback completed successfully — workflow OK"
+            echo "Smoke failed; rollback completed successfully — workflow OK"
             exit 0
           fi
 
@@ -369,9 +417,9 @@ jobs:
           fi
 
           if [ "$RB_A" = "cancelled" ] || [ "$RB_I" = "cancelled" ]; then
-            echo "::error::Rollback was cancelled"
+            echo "::error::Rollback was cancelled or still pending"
             exit 1
           fi
 
-          echo "::error::Rollback was needed but did not succeed (rollback-after-approval=$RB_A rollback-immediate=$RB_I)"
+          echo "::error::Rollback was required but did not complete (rollback-after-approval=$RB_A rollback-immediate=$RB_I)"
           exit 1
