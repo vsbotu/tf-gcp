@@ -4,6 +4,9 @@
 # (via workflow outputs). First install: empty previous_revision → skip rollback for that app.
 # Rollback is Helm-only, not Terraform.
 #
+# Testing rollback: set "Simulate smoke failure" to true on a workflow run *after* nginx1/nginx2
+# have been deployed at least once, so previous_revision is non-empty and helm rollback can run.
+#
 # Auth: repo variables GCP_PROJECT_ID, GCP_WIF_PROVIDER, GCP_SA_EMAIL, GCP_WIF_AUDIENCE;
 # optional GKE_CLUSTER_NAME, GKE_ZONE.
 
@@ -16,6 +19,10 @@ on:
         description: "Kubernetes namespace (created if missing)"
         type: string
         default: "demo"
+      simulate_smoke_failure:
+        description: "If true, force smoke to fail after checks (tests rollback; needs prior Helm revision)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -91,6 +98,7 @@ jobs:
           NS: ${{ inputs.namespace }}
           PREV1: ${{ needs.nginx1.outputs.previous_revision }}
           PREV2: ${{ needs.nginx2.outputs.previous_revision }}
+          SIMULATE_SMOKE_FAILURE: ${{ inputs.simulate_smoke_failure }}
         run: |
           set -euo pipefail
 
@@ -116,6 +124,11 @@ jobs:
             smoke_ok=false
           fi
           kubectl delete pod "$POD" -n "$NS" --ignore-not-found
+
+          if [ "${SIMULATE_SMOKE_FAILURE}" = "true" ]; then
+            echo "::warning::simulate_smoke_failure is true — forcing smoke failure to exercise rollback"
+            smoke_ok=false
+          fi
 
           if [ "$smoke_ok" != true ]; then
             echo "::error::Smoke tests failed; rolling back to pre-upgrade Helm revisions where available."
