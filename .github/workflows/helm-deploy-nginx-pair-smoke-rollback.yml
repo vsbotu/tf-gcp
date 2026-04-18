@@ -3,6 +3,7 @@
 #
 # Smoke failure marks the smoke-tests job failed (red). Rollback intent is passed via artifact
 # smoke-meta.json + job "evaluate-rollback" (GitHub does not expose outputs from failed jobs).
+# Job IDs with hyphens: use needs['job-id'] in expressions — needs.evaluate-rollback is parsed as subtraction.
 # workflow-result: green if smoke passed, or smoke failed and rollback succeeded; red otherwise.
 #
 # On smoke failure: optional manual approval (GitHub Environment), then Helm rollback.
@@ -205,7 +206,7 @@ jobs:
   rollback-after-approval:
     needs: [nginx1, nginx2, evaluate-rollback]
     # Boolean workflow_dispatch inputs: use !inputs.* / inputs.* — avoid == false / == true (often skips jobs).
-    if: ${{ needs.evaluate-rollback.outputs.needs_rollback == 'true' && !inputs.skip_rollback_approval }}
+    if: ${{ needs['evaluate-rollback'].outputs.needs_rollback == 'true' && !inputs.skip_rollback_approval }}
     environment: helm-rollback
     runs-on: ubuntu-latest
     steps:
@@ -290,7 +291,7 @@ jobs:
 
   rollback-immediate:
     needs: [nginx1, nginx2, evaluate-rollback]
-    if: ${{ needs.evaluate-rollback.outputs.needs_rollback == 'true' && inputs.skip_rollback_approval }}
+    if: ${{ needs['evaluate-rollback'].outputs.needs_rollback == 'true' && inputs.skip_rollback_approval }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -381,10 +382,10 @@ jobs:
       - name: Set overall workflow status
         run: |
           set -euo pipefail
-          SMOKE_JOB="${{ needs.smoke-tests.result }}"
-          EVAL_RB="${{ needs.evaluate-rollback.outputs.needs_rollback }}"
-          RB_A="${{ needs.rollback-after-approval.result }}"
-          RB_I="${{ needs.rollback-immediate.result }}"
+          SMOKE_JOB="${{ needs['smoke-tests'].result }}"
+          EVAL_RB="${{ needs['evaluate-rollback'].outputs.needs_rollback }}"
+          RB_A="${{ needs['rollback-after-approval'].result }}"
+          RB_I="${{ needs['rollback-immediate'].result }}"
 
           if [ "$SMOKE_JOB" = "skipped" ]; then
             echo "::error::smoke-tests was skipped — check nginx deploy jobs"
