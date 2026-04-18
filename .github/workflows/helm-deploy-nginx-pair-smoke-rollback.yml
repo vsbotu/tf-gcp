@@ -139,8 +139,16 @@ jobs:
 
       - name: Parse smoke metadata
         id: parse
+        env:
+          SMOKE_RESULT: ${{ needs.smoke_tests.result }}
         run: |
           set -euo pipefail
+          # Authoritative: failed smoke job means rollback may be required (artifact can be missing/wrong).
+          if [ "$SMOKE_RESULT" = "failure" ]; then
+            echo "needs_rollback=true" >> "$GITHUB_OUTPUT"
+            echo "needs_rollback=true (smoke_tests job failed)"
+            exit 0
+          fi
           META=""
           if [ -f smoke-meta.json ]; then
             META=smoke-meta.json
@@ -158,9 +166,10 @@ jobs:
 
   rollback_after_approval:
     name: Rollback after approval
-    needs: [nginx1, nginx2, evaluate_rollback]
-    # Boolean workflow_dispatch inputs: use !inputs.* / inputs.* — avoid == false / == true (often skips jobs).
-    if: ${{ needs.evaluate_rollback.outputs.needs_rollback == 'true' && !inputs.skip_rollback_approval }}
+    needs: [nginx1, nginx2, smoke_tests, evaluate_rollback]
+    # needs smoke_tests + always(): when smoke fails, dependents are skipped unless if allows it.
+    # Boolean workflow_dispatch inputs: use !inputs.* — avoid == false (often skips jobs).
+    if: ${{ always() && needs.smoke_tests.result == 'failure' && needs.evaluate_rollback.outputs.needs_rollback == 'true' && !inputs.skip_rollback_approval }}
     environment: helm-rollback
     runs-on: ubuntu-latest
     steps:
@@ -245,8 +254,8 @@ jobs:
 
   rollback_immediate:
     name: Rollback immediate
-    needs: [nginx1, nginx2, evaluate_rollback]
-    if: ${{ needs.evaluate_rollback.outputs.needs_rollback == 'true' && inputs.skip_rollback_approval }}
+    needs: [nginx1, nginx2, smoke_tests, evaluate_rollback]
+    if: ${{ always() && needs.smoke_tests.result == 'failure' && needs.evaluate_rollback.outputs.needs_rollback == 'true' && inputs.skip_rollback_approval }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
