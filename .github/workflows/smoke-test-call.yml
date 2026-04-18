@@ -1,5 +1,5 @@
-# Thin dispatcher: runs vsbotu/smoketest reusable workflow only.
-# Private repo: org Actions must allow tf-gcp to use reusable workflows from smoketest, or parse fails with "workflow was not found".
+# Dispatches local reusable ./smoke-test-reusable.yml (same `fail` contract as vsbotu/smoketest).
+# Cross-repo uses: vsbotu/smoketest/... only works after org Actions allows private reusable workflows.
 
 name: Smoke test (call smoketest repo)
 
@@ -17,6 +17,6 @@ permissions:
 jobs:
   smoke:
     name: Smoke tests
-    uses: vsbotu/smoketest/.github/workflows/smoke-test.yml@main
+    uses: ./.github/workflows/smoke-test-reusable.yml
     with:
       fail: ${{ inputs.fail }}
