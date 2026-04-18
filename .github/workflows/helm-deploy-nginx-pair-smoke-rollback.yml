@@ -1,5 +1,11 @@
 # Calls reusable workflows [.github/workflows/helm-deploy-nginx1.yml] and
 # [helm-deploy-nginx2.yml] (parallel), then smoke tests.
+#
+# Why "smoke-tests" stays green when smoke fails: GitHub only publishes job outputs if the job
+# succeeds. Downstream rollback jobs need needs_rollback from smoke-tests, so that job must not
+# fail. Overall pass/fail is decided by "workflow-result" (green if smoke OK, or smoke failed and
+# rollback job succeeded).
+#
 # On smoke failure: optional manual approval (GitHub Environment), then Helm rollback.
 #
 # Environment "helm-rollback": create under Settings → Environments → add "Required reviewers"
@@ -147,6 +153,7 @@ jobs:
 
           if [ "$NEEDS_ROLLBACK" = "true" ]; then
             echo "::error::Smoke tests failed (or simulated). Approve the 'helm-rollback' environment to run Helm rollback, or use skip_rollback_approval."
+            echo "::notice::This job stays success so rollback inputs are published; workflow result is set in job workflow-result."
           else
             echo "=== OK: smoke passed ==="
             kubectl get deploy,svc,pods -n "$NS" \
@@ -212,19 +219,31 @@ jobs:
         run: |
           set -euo pipefail
           echo "::notice::Running Helm rollback after manual approval"
-          set +e
+          ERR=0
+          ATTEMPTED=0
           if [ -n "${PREV1}" ]; then
-            helm rollback "${{ env.RELEASE_1 }}" "${PREV1}" -n "$NS" --wait --timeout 5m || echo "::warning::rollback ${{ env.RELEASE_1 }} failed"
+            ATTEMPTED=1
+            if ! helm rollback "${{ env.RELEASE_1 }}" "${PREV1}" -n "$NS" --wait --timeout 5m; then
+              echo "::error::rollback ${{ env.RELEASE_1 }} failed"
+              ERR=1
+            fi
           else
             echo "Skip rollback ${{ env.RELEASE_1 }}: no prior revision"
           fi
           if [ -n "${PREV2}" ]; then
-            helm rollback "${{ env.RELEASE_2 }}" "${PREV2}" -n "$NS" --wait --timeout 5m || echo "::warning::rollback ${{ env.RELEASE_2 }} failed"
+            ATTEMPTED=1
+            if ! helm rollback "${{ env.RELEASE_2 }}" "${PREV2}" -n "$NS" --wait --timeout 5m; then
+              echo "::error::rollback ${{ env.RELEASE_2 }} failed"
+              ERR=1
+            fi
           else
             echo "Skip rollback ${{ env.RELEASE_2 }}: no prior revision"
           fi
-          set -e
-          exit 1
+          if [ "$ATTEMPTED" -eq 0 ]; then
+            echo "::error::No prior Helm revision to roll back to"
+            exit 1
+          fi
+          exit "$ERR"
 
   rollback-immediate:
     needs: [nginx1, nginx2, smoke-tests]
@@ -284,16 +303,75 @@ jobs:
         run: |
           set -euo pipefail
           echo "::notice::Running Helm rollback (skip_rollback_approval=true)"
-          set +e
+          ERR=0
+          ATTEMPTED=0
           if [ -n "${PREV1}" ]; then
-            helm rollback "${{ env.RELEASE_1 }}" "${PREV1}" -n "$NS" --wait --timeout 5m || echo "::warning::rollback ${{ env.RELEASE_1 }} failed"
+            ATTEMPTED=1
+            if ! helm rollback "${{ env.RELEASE_1 }}" "${PREV1}" -n "$NS" --wait --timeout 5m; then
+              echo "::error::rollback ${{ env.RELEASE_1 }} failed"
+              ERR=1
+            fi
           else
             echo "Skip rollback ${{ env.RELEASE_1 }}: no prior revision"
           fi
           if [ -n "${PREV2}" ]; then
-            helm rollback "${{ env.RELEASE_2 }}" "${PREV2}" -n "$NS" --wait --timeout 5m || echo "::warning::rollback ${{ env.RELEASE_2 }} failed"
+            ATTEMPTED=1
+            if ! helm rollback "${{ env.RELEASE_2 }}" "${PREV2}" -n "$NS" --wait --timeout 5m; then
+              echo "::error::rollback ${{ env.RELEASE_2 }} failed"
+              ERR=1
+            fi
           else
             echo "Skip rollback ${{ env.RELEASE_2 }}: no prior revision"
           fi
-          set -e
+          if [ "$ATTEMPTED" -eq 0 ]; then
+            echo "::error::No prior Helm revision to roll back to"
+            exit 1
+          fi
+          exit "$ERR"
+
+  workflow-result:
+    name: Workflow result
+    needs: [smoke-tests, rollback-after-approval, rollback-immediate]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set overall workflow status
+        run: |
+          set -euo pipefail
+          SMOKE_JOB="${{ needs.smoke-tests.result }}"
+          RB_A="${{ needs.rollback-after-approval.result }}"
+          RB_I="${{ needs.rollback-immediate.result }}"
+
+          if [ "$SMOKE_JOB" = "failure" ] || [ "$SMOKE_JOB" = "cancelled" ]; then
+            echo "::error::smoke-tests job did not complete successfully — check logs"
+            exit 1
+          fi
+
+          if [ "$SMOKE_JOB" = "skipped" ]; then
+            echo "::error::smoke-tests was skipped — check nginx deploy jobs"
+            exit 1
+          fi
+
+          NEEDS_RB="${{ needs.smoke-tests.outputs.needs_rollback }}"
+          if [ "$NEEDS_RB" != "true" ]; then
+            echo "Smoke passed — workflow OK"
+            exit 0
+          fi
+
+          if [ "$RB_A" = "success" ] || [ "$RB_I" = "success" ]; then
+            echo "Rollback completed successfully — workflow OK"
+            exit 0
+          fi
+
+          if [ "$RB_A" = "failure" ] || [ "$RB_I" = "failure" ]; then
+            echo "::error::Rollback job failed — see rollback logs"
+            exit 1
+          fi
+
+          if [ "$RB_A" = "cancelled" ] || [ "$RB_I" = "cancelled" ]; then
+            echo "::error::Rollback was cancelled"
+            exit 1
+          fi
+
+          echo "::error::Rollback was needed but did not succeed (rollback-after-approval=$RB_A rollback-immediate=$RB_I)"
           exit 1
