@@ -1,0 +1,141 @@
+# Deploy to: github.com/vsbotu/smoketest/.github/workflows/smoke-test.yml
+#
+# Self-contained: GCP/GKE settings come from THIS repo's Actions variables (vars.*).
+# Caller (terraform-gcp) only passes namespace + simulate_smoke_failure.
+#
+# Required vars in smoketest: GCP_PROJECT_ID, GCP_WIF_PROVIDER, GCP_SA_EMAIL, GCP_WIF_AUDIENCE
+# Optional: GKE_CLUSTER_NAME, GKE_ZONE (defaults match gke-us-east1-demo / us-east1-b)
+#
+# WIF: OIDC subject uses the repo that *started* the run — allow both terraform-gcp (caller) and
+# smoketest (manual workflow_dispatch) in your GCP workload identity pool if you use both.
+
+name: Smoke test
+
+on:
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: Kubernetes namespace
+        type: string
+        default: demo
+      simulate_smoke_failure:
+        description: Force smoke failure (rollback testing)
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      namespace:
+        type: string
+        required: true
+      simulate_smoke_failure:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  id-token: write
+  actions: write
+
+env:
+  RELEASE_1: nginx1
+  RELEASE_2: nginx2
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check repository variables
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -z "${{ vars.GCP_PROJECT_ID }}" ] && missing+=(GCP_PROJECT_ID)
+          [ -z "${{ vars.GCP_WIF_PROVIDER }}" ] && missing+=(GCP_WIF_PROVIDER)
+          [ -z "${{ vars.GCP_SA_EMAIL }}" ] && missing+=(GCP_SA_EMAIL)
+          [ -z "${{ vars.GCP_WIF_AUDIENCE }}" ] && missing+=(GCP_WIF_AUDIENCE)
+          if [ "${#missing[@]}" -ne 0 ]; then
+            echo "Set Actions variables on this repo (smoketest): ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SA_EMAIL }}
+          audience: ${{ vars.GCP_WIF_AUDIENCE }}
+
+      - name: Set up gcloud and kubectl
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: "gke-gcloud-auth-plugin"
+
+      - name: Get GKE credentials
+        env:
+          CLUSTER: ${{ vars.GKE_CLUSTER_NAME }}
+          ZONE: ${{ vars.GKE_ZONE }}
+        run: |
+          set -euo pipefail
+          CLUSTER="${CLUSTER:-gke-us-east1-demo}"
+          ZONE="${ZONE:-us-east1-b}"
+          echo "Using cluster=$CLUSTER zone=$ZONE"
+          gcloud container clusters get-credentials "$CLUSTER" \
+            --zone "$ZONE" \
+            --project "${{ vars.GCP_PROJECT_ID }}"
+
+      - name: Smoke tests
+        id: smoke
+        env:
+          NS: ${{ inputs.namespace }}
+          REL1: ${{ env.RELEASE_1 }}
+          REL2: ${{ env.RELEASE_2 }}
+          SIMULATE_SMOKE_FAILURE: ${{ inputs.simulate_smoke_failure }}
+        run: |
+          set -euo pipefail
+
+          echo "=== Targets: ${REL1} ${REL2} ns=$NS ==="
+
+          smoke_ok=true
+
+          echo "=== Smoke: rollout status ==="
+          kubectl rollout status "deployment/${REL1}" -n "$NS" --timeout=120s || smoke_ok=false
+          kubectl rollout status "deployment/${REL2}" -n "$NS" --timeout=120s || smoke_ok=false
+
+          echo "=== Smoke: in-cluster HTTP (curl pod) ==="
+          POD="smoke-curl-${GITHUB_RUN_ID}"
+          kubectl delete pod "$POD" -n "$NS" --ignore-not-found --wait=true 2>/dev/null || true
+          kubectl run "$POD" -n "$NS" --restart=Never --image=curlimages/curl:8.5.0 \
+            --command -- sh -c "curl -sf \"http://${REL1}/\" >/dev/null && curl -sf \"http://${REL2}/\" >/dev/null"
+          if ! kubectl wait --for=jsonpath='{.status.phase}'=Succeeded "pod/$POD" -n "$NS" --timeout=120s; then
+            echo "::warning::curl smoke pod did not succeed; dumping logs"
+            kubectl logs "pod/$POD" -n "$NS" 2>/dev/null || true
+            kubectl describe "pod/$POD" -n "$NS" || true
+            smoke_ok=false
+          fi
+          kubectl delete pod "$POD" -n "$NS" --ignore-not-found
+
+          NEEDS_ROLLBACK=false
+          if [ "${SIMULATE_SMOKE_FAILURE}" = "true" ]; then
+            echo "::warning::simulate_smoke_failure is true — treating as rollback candidate"
+            NEEDS_ROLLBACK=true
+          elif [ "$smoke_ok" != true ]; then
+            NEEDS_ROLLBACK=true
+          fi
+
+          printf '{"needs_rollback":"%s","namespace":"%s"}\n' "$NEEDS_ROLLBACK" "$NS" > smoke-meta.json
+
+          if [ "$NEEDS_ROLLBACK" = "true" ]; then
+            echo "::error::Smoke tests failed (or simulated). After approval, rollback runs in caller workflow."
+            exit 1
+          fi
+
+          echo "=== OK: smoke passed ==="
+          kubectl get deploy,svc,pods -n "$NS" \
+            -l "app.kubernetes.io/instance in (${REL1},${REL2})"
+
+      - name: Upload smoke metadata for rollback jobs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-meta
+          path: smoke-meta.json
+          if-no-files-found: warn
