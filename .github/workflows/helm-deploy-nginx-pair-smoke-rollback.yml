@@ -1,11 +1,14 @@
 # Calls reusable workflows [.github/workflows/helm-deploy-nginx1.yml] and
-# [helm-deploy-nginx2.yml] (they deploy in parallel), then runs smoke tests.
-# On smoke failure, rolls back each release to the revision recorded before that deploy
-# (via workflow outputs). First install: empty previous_revision → skip rollback for that app.
+# [helm-deploy-nginx2.yml] (parallel), then smoke tests.
+# On smoke failure: optional manual approval (GitHub Environment), then Helm rollback.
+#
+# Environment "helm-rollback": create under Settings → Environments → add "Required reviewers"
+# so the rollback job waits for approval before running helm rollback.
+#
+# First install: empty previous_revision → rollback step skips that release.
 # Rollback is Helm-only, not Terraform.
 #
-# Testing rollback: set "Simulate smoke failure" to true on a workflow run *after* nginx1/nginx2
-# have been deployed at least once, so previous_revision is non-empty and helm rollback can run.
+# Testing rollback: use simulate_smoke_failure after at least one successful deploy so revisions exist.
 #
 # Auth: repo variables GCP_PROJECT_ID, GCP_WIF_PROVIDER, GCP_SA_EMAIL, GCP_WIF_AUDIENCE;
 # optional GKE_CLUSTER_NAME, GKE_ZONE.
@@ -21,6 +24,10 @@ on:
         default: "demo"
       simulate_smoke_failure:
         description: "If true, force smoke to fail after checks (tests rollback; needs prior Helm revision)"
+        type: boolean
+        default: false
+      skip_rollback_approval:
+        description: "If true, run helm rollback immediately without waiting for Environment approval (CI/lab only)"
         type: boolean
         default: false
 
@@ -43,9 +50,11 @@ jobs:
     with:
       namespace: ${{ inputs.namespace }}
 
-  smoke-and-rollback:
+  smoke-tests:
     needs: [nginx1, nginx2]
     runs-on: ubuntu-latest
+    outputs:
+      needs_rollback: ${{ steps.smoke.outputs.needs_rollback }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -93,7 +102,8 @@ jobs:
         with:
           version: "v3.14.4"
 
-      - name: Smoke tests and conditional rollback
+      - name: Smoke tests
+        id: smoke
         env:
           NS: ${{ inputs.namespace }}
           PREV1: ${{ needs.nginx1.outputs.previous_revision }}
@@ -125,30 +135,165 @@ jobs:
           fi
           kubectl delete pod "$POD" -n "$NS" --ignore-not-found
 
+          NEEDS_ROLLBACK=false
           if [ "${SIMULATE_SMOKE_FAILURE}" = "true" ]; then
-            echo "::warning::simulate_smoke_failure is true — forcing smoke failure to exercise rollback"
-            smoke_ok=false
+            echo "::warning::simulate_smoke_failure is true — treating as rollback candidate"
+            NEEDS_ROLLBACK=true
+          elif [ "$smoke_ok" != true ]; then
+            NEEDS_ROLLBACK=true
           fi
 
-          if [ "$smoke_ok" != true ]; then
-            echo "::error::Smoke tests failed; rolling back to pre-upgrade Helm revisions where available."
-            set +e
-            if [ -n "${PREV1}" ]; then
-              echo "helm rollback ${{ env.RELEASE_1 }} ${PREV1}"
-              helm rollback "${{ env.RELEASE_1 }}" "${PREV1}" -n "$NS" --wait --timeout 5m || echo "::warning::rollback ${{ env.RELEASE_1 }} failed"
-            else
-              echo "Skip rollback ${{ env.RELEASE_1 }}: no prior revision (first install this run)."
-            fi
-            if [ -n "${PREV2}" ]; then
-              echo "helm rollback ${{ env.RELEASE_2 }} ${PREV2}"
-              helm rollback "${{ env.RELEASE_2 }}" "${PREV2}" -n "$NS" --wait --timeout 5m || echo "::warning::rollback ${{ env.RELEASE_2 }} failed"
-            else
-              echo "Skip rollback ${{ env.RELEASE_2 }}: no prior revision (first install this run)."
-            fi
-            set -e
+          echo "needs_rollback=$NEEDS_ROLLBACK" >> "$GITHUB_OUTPUT"
+
+          if [ "$NEEDS_ROLLBACK" = "true" ]; then
+            echo "::error::Smoke tests failed (or simulated). Approve the 'helm-rollback' environment to run Helm rollback, or use skip_rollback_approval."
+          else
+            echo "=== OK: smoke passed ==="
+            kubectl get deploy,svc,pods -n "$NS" \
+              -l "app.kubernetes.io/instance in (${{ env.RELEASE_1 }},${{ env.RELEASE_2 }})"
+          fi
+
+  rollback-after-approval:
+    needs: [nginx1, nginx2, smoke-tests]
+    if: needs.smoke-tests.outputs.needs_rollback == 'true' && inputs.skip_rollback_approval == false
+    environment: helm-rollback
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check required variables (WIF + project)
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -z "${{ vars.GCP_PROJECT_ID }}" ] && missing+=(GCP_PROJECT_ID)
+          [ -z "${{ vars.GCP_WIF_PROVIDER }}" ] && missing+=(GCP_WIF_PROVIDER)
+          [ -z "${{ vars.GCP_SA_EMAIL }}" ] && missing+=(GCP_SA_EMAIL)
+          [ -z "${{ vars.GCP_WIF_AUDIENCE }}" ] && missing+=(GCP_WIF_AUDIENCE)
+          if [ "${#missing[@]}" -ne 0 ]; then
+            echo "Missing GitHub Actions variables: ${missing[*]}"
             exit 1
           fi
 
-          echo "=== OK: smoke passed ==="
-          kubectl get deploy,svc,pods -n "$NS" \
-            -l "app.kubernetes.io/instance in (${{ env.RELEASE_1 }},${{ env.RELEASE_2 }})"
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SA_EMAIL }}
+          audience: ${{ vars.GCP_WIF_AUDIENCE }}
+
+      - name: Set up gcloud and kubectl
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: "gke-gcloud-auth-plugin"
+
+      - name: Get GKE credentials
+        env:
+          CLUSTER: ${{ vars.GKE_CLUSTER_NAME }}
+          ZONE: ${{ vars.GKE_ZONE }}
+        run: |
+          set -euo pipefail
+          CLUSTER="${CLUSTER:-gke-us-east1-demo}"
+          ZONE="${ZONE:-us-east1-b}"
+          gcloud container clusters get-credentials "$CLUSTER" \
+            --zone "$ZONE" \
+            --project "${{ vars.GCP_PROJECT_ID }}"
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "v3.14.4"
+
+      - name: Helm rollback (post-approval)
+        env:
+          NS: ${{ inputs.namespace }}
+          PREV1: ${{ needs.nginx1.outputs.previous_revision }}
+          PREV2: ${{ needs.nginx2.outputs.previous_revision }}
+        run: |
+          set -euo pipefail
+          echo "::notice::Running Helm rollback after manual approval"
+          set +e
+          if [ -n "${PREV1}" ]; then
+            helm rollback "${{ env.RELEASE_1 }}" "${PREV1}" -n "$NS" --wait --timeout 5m || echo "::warning::rollback ${{ env.RELEASE_1 }} failed"
+          else
+            echo "Skip rollback ${{ env.RELEASE_1 }}: no prior revision"
+          fi
+          if [ -n "${PREV2}" ]; then
+            helm rollback "${{ env.RELEASE_2 }}" "${PREV2}" -n "$NS" --wait --timeout 5m || echo "::warning::rollback ${{ env.RELEASE_2 }} failed"
+          else
+            echo "Skip rollback ${{ env.RELEASE_2 }}: no prior revision"
+          fi
+          set -e
+          exit 1
+
+  rollback-immediate:
+    needs: [nginx1, nginx2, smoke-tests]
+    if: needs.smoke-tests.outputs.needs_rollback == 'true' && inputs.skip_rollback_approval == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check required variables (WIF + project)
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -z "${{ vars.GCP_PROJECT_ID }}" ] && missing+=(GCP_PROJECT_ID)
+          [ -z "${{ vars.GCP_WIF_PROVIDER }}" ] && missing+=(GCP_WIF_PROVIDER)
+          [ -z "${{ vars.GCP_SA_EMAIL }}" ] && missing+=(GCP_SA_EMAIL)
+          [ -z "${{ vars.GCP_WIF_AUDIENCE }}" ] && missing+=(GCP_WIF_AUDIENCE)
+          if [ "${#missing[@]}" -ne 0 ]; then
+            echo "Missing GitHub Actions variables: ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SA_EMAIL }}
+          audience: ${{ vars.GCP_WIF_AUDIENCE }}
+
+      - name: Set up gcloud and kubectl
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: "gke-gcloud-auth-plugin"
+
+      - name: Get GKE credentials
+        env:
+          CLUSTER: ${{ vars.GKE_CLUSTER_NAME }}
+          ZONE: ${{ vars.GKE_ZONE }}
+        run: |
+          set -euo pipefail
+          CLUSTER="${CLUSTER:-gke-us-east1-demo}"
+          ZONE="${ZONE:-us-east1-b}"
+          gcloud container clusters get-credentials "$CLUSTER" \
+            --zone "$ZONE" \
+            --project "${{ vars.GCP_PROJECT_ID }}"
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "v3.14.4"
+
+      - name: Helm rollback (no approval gate)
+        env:
+          NS: ${{ inputs.namespace }}
+          PREV1: ${{ needs.nginx1.outputs.previous_revision }}
+          PREV2: ${{ needs.nginx2.outputs.previous_revision }}
+        run: |
+          set -euo pipefail
+          echo "::notice::Running Helm rollback (skip_rollback_approval=true)"
+          set +e
+          if [ -n "${PREV1}" ]; then
+            helm rollback "${{ env.RELEASE_1 }}" "${PREV1}" -n "$NS" --wait --timeout 5m || echo "::warning::rollback ${{ env.RELEASE_1 }} failed"
+          else
+            echo "Skip rollback ${{ env.RELEASE_1 }}: no prior revision"
+          fi
+          if [ -n "${PREV2}" ]; then
+            helm rollback "${{ env.RELEASE_2 }}" "${PREV2}" -n "$NS" --wait --timeout 5m || echo "::warning::rollback ${{ env.RELEASE_2 }} failed"
+          else
+            echo "Skip rollback ${{ env.RELEASE_2 }}: no prior revision"
+          fi
+          set -e
+          exit 1
