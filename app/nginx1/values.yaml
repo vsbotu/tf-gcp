@@ -1,0 +1,21 @@
+# Values for Helm release `nginx1` (chart: deploy/helm/nginx-sample).
+# Change image.tag, push, then run workflow "Helm deploy nginx1" to test upgrades.
+#
+# Rollback (after get-credentials to the cluster):
+#   helm history nginx1 -n <namespace>
+#   helm rollback nginx1 -n <namespace>              # one revision back
+#   helm rollback nginx1 <revision> -n <namespace> # specific revision
+
+replicaCount: 1
+
+fullnameOverride: "nginx1"
+
+image:
+  repository: nginx
+  tag: "1.25"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 80
