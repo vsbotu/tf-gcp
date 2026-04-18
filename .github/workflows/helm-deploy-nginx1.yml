@@ -15,6 +15,16 @@ on:
         description: "Kubernetes namespace (created if missing)"
         type: string
         default: "demo"
+  workflow_call:
+    inputs:
+      namespace:
+        description: "Kubernetes namespace (created if missing)"
+        type: string
+        default: "demo"
+    outputs:
+      previous_revision:
+        description: "Helm revision before upgrade (empty on first install)"
+        value: ${{ jobs.deploy.outputs.previous_revision }}
 
 permissions:
   contents: read
@@ -28,6 +38,8 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    outputs:
+      previous_revision: ${{ steps.capture.outputs.previous_revision }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -74,6 +86,17 @@ jobs:
         uses: azure/setup-helm@v4
         with:
           version: "v3.14.4"
+
+      - name: Record Helm revision before upgrade
+        id: capture
+        run: |
+          set -euo pipefail
+          NS="${{ inputs.namespace }}"
+          REL="${{ env.RELEASE_NAME }}"
+          kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
+          REV=$(helm get metadata "$REL" -n "$NS" -o json 2>/dev/null | jq -r '.revision // empty' || true)
+          echo "previous_revision=$REV" >> "$GITHUB_OUTPUT"
+          echo "Recorded previous_revision=${REV:-<none>} for $REL in $NS"
 
       - name: Helm lint
         run: helm lint "${{ env.CHART_PATH }}" -f "${{ env.VALUES_FILE }}"

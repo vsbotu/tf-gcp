@@ -1,0 +1,141 @@
+# Calls reusable workflows [.github/workflows/helm-deploy-nginx1.yml] and
+# [helm-deploy-nginx2.yml] (they deploy in parallel), then runs smoke tests.
+# On smoke failure, rolls back each release to the revision recorded before that deploy
+# (via workflow outputs). First install: empty previous_revision → skip rollback for that app.
+# Rollback is Helm-only, not Terraform.
+#
+# Auth: repo variables GCP_PROJECT_ID, GCP_WIF_PROVIDER, GCP_SA_EMAIL, GCP_WIF_AUDIENCE;
+# optional GKE_CLUSTER_NAME, GKE_ZONE.
+
+name: Helm nginx1+nginx2 (smoke + rollback)
+
+on:
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: "Kubernetes namespace (created if missing)"
+        type: string
+        default: "demo"
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  RELEASE_1: nginx1
+  RELEASE_2: nginx2
+
+jobs:
+  nginx1:
+    uses: ./.github/workflows/helm-deploy-nginx1.yml
+    with:
+      namespace: ${{ inputs.namespace }}
+
+  nginx2:
+    uses: ./.github/workflows/helm-deploy-nginx2.yml
+    with:
+      namespace: ${{ inputs.namespace }}
+
+  smoke-and-rollback:
+    needs: [nginx1, nginx2]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check required variables (WIF + project)
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -z "${{ vars.GCP_PROJECT_ID }}" ] && missing+=(GCP_PROJECT_ID)
+          [ -z "${{ vars.GCP_WIF_PROVIDER }}" ] && missing+=(GCP_WIF_PROVIDER)
+          [ -z "${{ vars.GCP_SA_EMAIL }}" ] && missing+=(GCP_SA_EMAIL)
+          [ -z "${{ vars.GCP_WIF_AUDIENCE }}" ] && missing+=(GCP_WIF_AUDIENCE)
+          if [ "${#missing[@]}" -ne 0 ]; then
+            echo "Missing GitHub Actions variables: ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SA_EMAIL }}
+          audience: ${{ vars.GCP_WIF_AUDIENCE }}
+
+      - name: Set up gcloud and kubectl
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: "gke-gcloud-auth-plugin"
+
+      - name: Get GKE credentials
+        env:
+          CLUSTER: ${{ vars.GKE_CLUSTER_NAME }}
+          ZONE: ${{ vars.GKE_ZONE }}
+        run: |
+          set -euo pipefail
+          CLUSTER="${CLUSTER:-gke-us-east1-demo}"
+          ZONE="${ZONE:-us-east1-b}"
+          echo "Using cluster=$CLUSTER zone=$ZONE"
+          gcloud container clusters get-credentials "$CLUSTER" \
+            --zone "$ZONE" \
+            --project "${{ vars.GCP_PROJECT_ID }}"
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: "v3.14.4"
+
+      - name: Smoke tests and conditional rollback
+        env:
+          NS: ${{ inputs.namespace }}
+          PREV1: ${{ needs.nginx1.outputs.previous_revision }}
+          PREV2: ${{ needs.nginx2.outputs.previous_revision }}
+        run: |
+          set -euo pipefail
+
+          echo "=== Revisions before deploy (from called workflows) ==="
+          echo "PREV_${{ env.RELEASE_1 }}=${PREV1:-<none>}"
+          echo "PREV_${{ env.RELEASE_2 }}=${PREV2:-<none>}"
+
+          smoke_ok=true
+
+          echo "=== Smoke: rollout status ==="
+          kubectl rollout status "deployment/${{ env.RELEASE_1 }}" -n "$NS" --timeout=120s || smoke_ok=false
+          kubectl rollout status "deployment/${{ env.RELEASE_2 }}" -n "$NS" --timeout=120s || smoke_ok=false
+
+          echo "=== Smoke: in-cluster HTTP (curl pod) ==="
+          POD="smoke-curl-${GITHUB_RUN_ID}"
+          kubectl delete pod "$POD" -n "$NS" --ignore-not-found --wait=true 2>/dev/null || true
+          kubectl run "$POD" -n "$NS" --restart=Never --image=curlimages/curl:8.5.0 \
+            --command -- sh -c 'curl -sf "http://${{ env.RELEASE_1 }}/" >/dev/null && curl -sf "http://${{ env.RELEASE_2 }}/" >/dev/null'
+          if ! kubectl wait --for=jsonpath='{.status.phase}'=Succeeded "pod/$POD" -n "$NS" --timeout=120s; then
+            echo "::warning::curl smoke pod did not succeed; dumping logs"
+            kubectl logs "pod/$POD" -n "$NS" 2>/dev/null || true
+            kubectl describe "pod/$POD" -n "$NS" || true
+            smoke_ok=false
+          fi
+          kubectl delete pod "$POD" -n "$NS" --ignore-not-found
+
+          if [ "$smoke_ok" != true ]; then
+            echo "::error::Smoke tests failed; rolling back to pre-upgrade Helm revisions where available."
+            set +e
+            if [ -n "${PREV1}" ]; then
+              echo "helm rollback ${{ env.RELEASE_1 }} ${PREV1}"
+              helm rollback "${{ env.RELEASE_1 }}" "${PREV1}" -n "$NS" --wait --timeout 5m || echo "::warning::rollback ${{ env.RELEASE_1 }} failed"
+            else
+              echo "Skip rollback ${{ env.RELEASE_1 }}: no prior revision (first install this run)."
+            fi
+            if [ -n "${PREV2}" ]; then
+              echo "helm rollback ${{ env.RELEASE_2 }} ${PREV2}"
+              helm rollback "${{ env.RELEASE_2 }}" "${PREV2}" -n "$NS" --wait --timeout 5m || echo "::warning::rollback ${{ env.RELEASE_2 }} failed"
+            else
+              echo "Skip rollback ${{ env.RELEASE_2 }}: no prior revision (first install this run)."
+            fi
+            set -e
+            exit 1
+          fi
+
+          echo "=== OK: smoke passed ==="
+          kubectl get deploy,svc,pods -n "$NS" \
+            -l "app.kubernetes.io/instance in (${{ env.RELEASE_1 }},${{ env.RELEASE_2 }})"
