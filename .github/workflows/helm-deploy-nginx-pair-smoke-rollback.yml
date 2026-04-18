@@ -1,9 +1,9 @@
 # Calls reusable workflows [.github/workflows/helm-deploy-nginx1.yml] and
 # [helm-deploy-nginx2.yml] (parallel), then smoke tests.
 #
-# Smoke failure marks the smoke-tests job failed (red). Rollback intent is passed via artifact
-# smoke-meta.json + job "evaluate-rollback" (GitHub does not expose outputs from failed jobs).
-# Job IDs with hyphens: use needs['job-id'] in expressions — needs.evaluate-rollback is parsed as subtraction.
+# Smoke failure marks the smoke_tests job failed (red). Rollback intent is passed via artifact
+# smoke-meta.json + job evaluate_rollback (GitHub does not expose outputs from failed jobs).
+# Job IDs use underscores (e.g. evaluate_rollback) so needs.*.outputs works — hyphens break expression parsing.
 # workflow-result: green if smoke passed, or smoke failed and rollback succeeded; red otherwise.
 #
 # On smoke failure: optional manual approval (GitHub Environment), then Helm rollback.
@@ -40,7 +40,7 @@ on:
 permissions:
   contents: read
   id-token: write
-  actions: write # upload-artifact (smoke-meta for evaluate-rollback)
+  actions: write # upload-artifact (smoke-meta for evaluate_rollback)
 
 env:
   RELEASE_1: nginx1
@@ -57,7 +57,8 @@ jobs:
     with:
       namespace: ${{ inputs.namespace }}
 
-  smoke-tests:
+  smoke_tests:
+    name: Smoke tests
     needs: [nginx1, nginx2]
     runs-on: ubuntu-latest
     steps:
@@ -148,7 +149,7 @@ jobs:
             NEEDS_ROLLBACK=true
           fi
 
-          # Written before exit so upload-artifact can pass intent to evaluate-rollback (failed jobs have no outputs).
+          # Written before exit so upload-artifact can pass intent to evaluate_rollback (failed jobs have no outputs).
           printf '{"needs_rollback":"%s","namespace":"%s"}\n' "$NEEDS_ROLLBACK" "$NS" > smoke-meta.json
 
           if [ "$NEEDS_ROLLBACK" = "true" ]; then
@@ -168,9 +169,9 @@ jobs:
           path: smoke-meta.json
           if-no-files-found: warn
 
-  evaluate-rollback:
+  evaluate_rollback:
     name: Evaluate rollback
-    needs: [nginx1, nginx2, smoke-tests]
+    needs: [nginx1, nginx2, smoke_tests]
     if: always()
     runs-on: ubuntu-latest
     outputs:
@@ -203,10 +204,11 @@ jobs:
           echo "needs_rollback=$NEEDS" >> "$GITHUB_OUTPUT"
           echo "Parsed needs_rollback=$NEEDS from $META"
 
-  rollback-after-approval:
-    needs: [nginx1, nginx2, evaluate-rollback]
+  rollback_after_approval:
+    name: Rollback after approval
+    needs: [nginx1, nginx2, evaluate_rollback]
     # Boolean workflow_dispatch inputs: use !inputs.* / inputs.* — avoid == false / == true (often skips jobs).
-    if: ${{ needs['evaluate-rollback'].outputs.needs_rollback == 'true' && !inputs.skip_rollback_approval }}
+    if: ${{ needs.evaluate_rollback.outputs.needs_rollback == 'true' && !inputs.skip_rollback_approval }}
     environment: helm-rollback
     runs-on: ubuntu-latest
     steps:
@@ -289,9 +291,10 @@ jobs:
           fi
           exit "$ERR"
 
-  rollback-immediate:
-    needs: [nginx1, nginx2, evaluate-rollback]
-    if: ${{ needs['evaluate-rollback'].outputs.needs_rollback == 'true' && inputs.skip_rollback_approval }}
+  rollback_immediate:
+    name: Rollback immediate
+    needs: [nginx1, nginx2, evaluate_rollback]
+    if: ${{ needs.evaluate_rollback.outputs.needs_rollback == 'true' && inputs.skip_rollback_approval }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -375,17 +378,17 @@ jobs:
 
   workflow-result:
     name: Workflow result
-    needs: [smoke-tests, evaluate-rollback, rollback-after-approval, rollback-immediate]
+    needs: [smoke_tests, evaluate_rollback, rollback_after_approval, rollback_immediate]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Set overall workflow status
         run: |
           set -euo pipefail
-          SMOKE_JOB="${{ needs['smoke-tests'].result }}"
-          EVAL_RB="${{ needs['evaluate-rollback'].outputs.needs_rollback }}"
-          RB_A="${{ needs['rollback-after-approval'].result }}"
-          RB_I="${{ needs['rollback-immediate'].result }}"
+          SMOKE_JOB="${{ needs.smoke_tests.result }}"
+          EVAL_RB="${{ needs.evaluate_rollback.outputs.needs_rollback }}"
+          RB_A="${{ needs.rollback_after_approval.result }}"
+          RB_I="${{ needs.rollback_immediate.result }}"
 
           if [ "$SMOKE_JOB" = "skipped" ]; then
             echo "::error::smoke-tests was skipped — check nginx deploy jobs"
@@ -429,5 +432,5 @@ jobs:
             exit 1
           fi
 
-          echo "::error::Rollback was required but did not complete (rollback-after-approval=$RB_A rollback-immediate=$RB_I)"
+          echo "::error::Rollback was required but did not complete (rollback_after_approval=$RB_A rollback_immediate=$RB_I)"
           exit 1
