@@ -1,6 +1,11 @@
 # Calls vsbotu/smoketest reusable workflow via workflow_call (see that repo’s smoke-test.yml).
-# Private repos in the same org: supported — no PAT. If the run errors on “workflow not found” or access,
-# check Org Settings → Actions → General (workflow/reusable-workflow policies) and that both repos have Actions enabled.
+#
+# Private repos — if you see "workflow was not found" when queueing, smoketest must not be "Not accessible":
+#   smoketest → Settings → Actions → General → "Access" → e.g. "Accessible from repositories owned by the user 'vsbotu'"
+#   (or "… in the '<ORG>' organization" if both repos live under that org) → Save.
+# Docs: https://docs.github.com/en/actions/sharing-automations/sharing-actions-and-workflows-with-your-organization
+#       https://docs.github.com/en/actions/how-tos/reuse-automations/share-across-private-repositories
+# Also confirm the workflow exists on ref @main (or pin a commit SHA).
 
 name: Smoke test (call smoketest repo)
 
