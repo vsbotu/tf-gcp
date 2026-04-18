@@ -1,5 +1,6 @@
-# Dispatches local reusable ./smoke-test-reusable.yml (same `fail` contract as vsbotu/smoketest).
-# Cross-repo uses: vsbotu/smoketest/... only works after org Actions allows private reusable workflows.
+# Calls vsbotu/smoketest reusable workflow via workflow_call (see that repo’s smoke-test.yml).
+# Private repos in the same org: supported — no PAT. If the run errors on “workflow not found” or access,
+# check Org Settings → Actions → General (workflow/reusable-workflow policies) and that both repos have Actions enabled.
 
 name: Smoke test (call smoketest repo)
 
@@ -7,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       fail:
-        description: "If true, smoketest job fails on purpose (rollback drill)"
+        description: "Passed to smoketest as input fail (rollback drill)"
         type: boolean
         default: false
 
@@ -15,8 +16,7 @@ permissions:
   contents: read
 
 jobs:
-  smoke:
-    name: Smoke tests
-    uses: ./.github/workflows/smoke-test-reusable.yml
+  smoke-test:
+    uses: vsbotu/smoketest/.github/workflows/smoke-test.yml@main
     with:
       fail: ${{ inputs.fail }}
