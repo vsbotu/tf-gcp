@@ -19,9 +19,9 @@
 # Auth (rollback jobs): repo variables here — GCP_PROJECT_ID, GCP_WIF_PROVIDER, GCP_SA_EMAIL,
 # GCP_WIF_AUDIENCE; optional GKE_CLUSTER_NAME, GKE_ZONE.
 #
-# Smoke: vsbotu/smoketest/.github/workflows/smoke-test.yml@main — succeeds/fails on its own; uses
-# vars on the smoketest repo. Caller only passes namespace + simulate_smoke_failure. Copy
-# smoketest/smoke-test.yml into that repo and mirror the same GCP vars there.
+# Smoke: vsbotu/smoketest/.github/workflows/smoke-test.yml — workflow_call input must be `fail`;
+# we pass simulate_smoke_failure as fail. Allow reusable workflows from smoketest in org Actions
+# settings. Stub smoketest jobs without smoke-meta artifact skip evaluate_rollback rollback path.
 
 name: Helm nginx1+nginx2 (smoke + rollback)
 
@@ -66,8 +66,7 @@ jobs:
     needs: [nginx1, nginx2]
     uses: vsbotu/smoketest/.github/workflows/smoke-test.yml@main
     with:
-      namespace: ${{ inputs.namespace }}
-      simulate_smoke_failure: ${{ inputs.simulate_smoke_failure }}
+      fail: ${{ inputs.simulate_smoke_failure }}
 
   evaluate_rollback:
     name: Evaluate rollback

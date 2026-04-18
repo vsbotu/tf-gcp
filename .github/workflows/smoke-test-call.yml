@@ -1,20 +1,16 @@
-# Standalone: runs only the reusable smoke tests from vsbotu/smoketest.
-# Use after nginx apps are already deployed (e.g. pair workflow or manual Helm).
+# Standalone: calls vsbotu/smoketest reusable workflow only.
+# Smoketest workflow_call must define input `fail` (boolean) — see that repo's smoke-test.yml.
 #
-# Requires: smoketest repo has .github/workflows/smoke-test.yml (workflow_call) and matching Actions vars.
-# See: smoketest/smoke-test.yml in this repo for the file to copy into smoketest.
+# If "workflow was not found": org must allow this repo to use reusable workflows from smoketest
+# (Settings → Actions → General → Fork pull request workflows / access to reusable workflows).
 
 name: Smoke test (call smoketest repo)
 
 on:
   workflow_dispatch:
     inputs:
-      namespace:
-        description: "Kubernetes namespace"
-        type: string
-        default: "demo"
-      simulate_smoke_failure:
-        description: "If true, force smoke failure (rollback testing)"
+      fail:
+        description: "If true, smoketest job fails on purpose (rollback drill)"
         type: boolean
         default: false
 
@@ -28,5 +24,4 @@ jobs:
     name: Smoke tests
     uses: vsbotu/smoketest/.github/workflows/smoke-test.yml@main
     with:
-      namespace: ${{ inputs.namespace }}
-      simulate_smoke_failure: ${{ inputs.simulate_smoke_failure }}
+      fail: ${{ inputs.fail }}
