@@ -187,18 +187,25 @@ jobs:
         id: parse
         run: |
           set -euo pipefail
-          if [ ! -f smoke-meta.json ]; then
+          META=""
+          if [ -f smoke-meta.json ]; then
+            META=smoke-meta.json
+          else
+            META=$(find . -name smoke-meta.json -print -quit 2>/dev/null || true)
+          fi
+          if [ -z "$META" ] || [ ! -f "$META" ]; then
             echo "needs_rollback=false" >> "$GITHUB_OUTPUT"
             echo "No smoke-meta.json (smoke job failed before writing metadata, or upload missing)"
             exit 0
           fi
-          NEEDS=$(jq -r .needs_rollback smoke-meta.json)
+          NEEDS=$(jq -r .needs_rollback "$META" | tr -d '\r\n')
           echo "needs_rollback=$NEEDS" >> "$GITHUB_OUTPUT"
-          echo "Parsed needs_rollback=$NEEDS"
+          echo "Parsed needs_rollback=$NEEDS from $META"
 
   rollback-after-approval:
     needs: [nginx1, nginx2, evaluate-rollback]
-    if: needs.evaluate-rollback.outputs.needs_rollback == 'true' && inputs.skip_rollback_approval == false
+    # Boolean workflow_dispatch inputs: use !inputs.* / inputs.* — avoid == false / == true (often skips jobs).
+    if: ${{ needs.evaluate-rollback.outputs.needs_rollback == 'true' && !inputs.skip_rollback_approval }}
     environment: helm-rollback
     runs-on: ubuntu-latest
     steps:
@@ -283,7 +290,7 @@ jobs:
 
   rollback-immediate:
     needs: [nginx1, nginx2, evaluate-rollback]
-    if: needs.evaluate-rollback.outputs.needs_rollback == 'true' && inputs.skip_rollback_approval == true
+    if: ${{ needs.evaluate-rollback.outputs.needs_rollback == 'true' && inputs.skip_rollback_approval }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
