@@ -1,13 +1,11 @@
-# Calls vsbotu/smoketest reusable workflow via workflow_call (see that repo’s smoke-test.yml).
+# Triggers vsbotu/smoketest: .github/workflows/smoke-test.yml via workflow_dispatch (REST API).
+# Reusable workflows (jobs.*.uses: owner/repo/...) require smoketest "Access" to allow this repo; if that
+# fails with "workflow was not found", this dispatch path still works with a PAT — see secret below.
 #
-# Private repos — if you see "workflow was not found" when queueing, smoketest must not be "Not accessible":
-#   smoketest → Settings → Actions → General → "Access" → e.g. "Accessible from repositories owned by the user 'vsbotu'"
-#   (or "… in the '<ORG>' organization" if both repos live under that org) → Save.
-# Docs: https://docs.github.com/en/actions/sharing-automations/sharing-actions-and-workflows-with-your-organization
-#       https://docs.github.com/en/actions/how-tos/reuse-automations/share-across-private-repositories
-# Also confirm the workflow exists on ref @main (or pin a commit SHA).
+# Secret: SMOKETEST_TRIGGER_TOKEN — classic PAT with `workflow` scope (or fine-grained: Actions write on smoketest).
+# GITHUB_TOKEN cannot trigger workflows in another repository.
 
-name: Smoke test (call smoketest repo)
+name: Smoke test (trigger smoketest repo)
 
 on:
   workflow_dispatch:
@@ -21,7 +19,14 @@ permissions:
   contents: read
 
 jobs:
-  smoke-test:
-    uses: vsbotu/smoketest/.github/workflows/smoke-test.yml@main
-    with:
-      fail: ${{ inputs.fail }}
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run smoketest workflow
+        env:
+          GH_TOKEN: ${{ secrets.SMOKETEST_TRIGGER_TOKEN }}
+        run: |
+          gh workflow run smoke-test.yml \
+            --repo vsbotu/smoketest \
+            --ref main \
+            -f fail=${{ inputs.fail }}
