@@ -1,6 +1,5 @@
-# Triggers vsbotu/smoketest: .github/workflows/smoke-test.yml via workflow_dispatch (REST API).
-# Secret: SMOKETEST_TRIGGER_TOKEN — classic PAT with `workflow` scope (or fine-grained: Actions write on smoketest).
-# GITHUB_TOKEN cannot trigger workflows in another repository.
+# Triggers vsbotu/smoketest/.github/workflows/smoke-test.yml (workflow_dispatch + wait).
+# Secret: SMOKETEST_TRIGGER_TOKEN — PAT with `workflow` scope on smoketest (or fine-grained Actions write).
 
 name: Smoke test (trigger smoketest repo)
 
@@ -24,14 +23,12 @@ jobs:
           GH_TOKEN: ${{ secrets.SMOKETEST_TRIGGER_TOKEN }}
         run: |
           set -euo pipefail
-          # API expects string values for workflow_dispatch inputs (even for type: boolean in the YAML).
           FAIL_JSON='${{ inputs.fail }}'
           if [ "$FAIL_JSON" = "true" ]; then FAIL_STR="true"; else FAIL_STR="false"; fi
 
           jq -n --arg f "$FAIL_STR" '{ref: "main", inputs: {fail: $f}}' \
             | gh api repos/vsbotu/smoketest/actions/workflows/smoke-test.yml/dispatches --method POST --input -
 
-          # Dispatch returns 204; poll until the new run appears (GitHub can take a few seconds).
           RUN_ID=""
           for _ in 1 2 3 4 5 6 7 8 9 10; do
             RUN_ID="$(gh run list --repo vsbotu/smoketest --workflow smoke-test.yml --branch main --limit 1 --json databaseId --jq '.[0].databaseId')"
@@ -41,7 +38,7 @@ jobs:
             sleep 2
           done
           if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
-            echo "::error::Could not find a workflow run on smoketest after dispatch. Check PAT permissions and smoketest Actions."
+            echo "::error::Could not find smoketest run after dispatch. Check SMOKETEST_TRIGGER_TOKEN."
             exit 1
           fi
 

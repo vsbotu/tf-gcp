@@ -19,8 +19,8 @@
 # Auth (rollback jobs): repo variables here — GCP_PROJECT_ID, GCP_WIF_PROVIDER, GCP_SA_EMAIL,
 # GCP_WIF_AUDIENCE; optional GKE_CLUSTER_NAME, GKE_ZONE.
 #
-# Smoke: ./smoke-test-reusable.yml (mirrors vsbotu/smoketest `fail` input; avoids cross-repo parse errors).
-# Stub has no smoke-meta artifact — evaluate_rollback path is limited unless smoketest uploads it.
+# Smoke: dispatches vsbotu/smoketest/.github/workflows/smoke-test.yml, waits for result; on failure
+# writes smoke-meta.json + artifact so evaluate_rollback → Helm rollback. Secret: SMOKETEST_TRIGGER_TOKEN.
 
 name: Helm nginx1+nginx2 (smoke + rollback)
 
@@ -63,9 +63,63 @@ jobs:
   smoke_tests:
     name: Smoke tests
     needs: [nginx1, nginx2]
-    uses: ./.github/workflows/smoke-test-reusable.yml
-    with:
-      fail: ${{ inputs.simulate_smoke_failure }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call smoketest repo and wait for result
+        id: dispatch
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.SMOKETEST_TRIGGER_TOKEN }}
+        run: |
+          set -euo pipefail
+          FAIL_JSON='${{ inputs.simulate_smoke_failure }}'
+          if [ "$FAIL_JSON" = "true" ]; then FAIL_STR="true"; else FAIL_STR="false"; fi
+
+          jq -n --arg f "$FAIL_STR" '{ref: "main", inputs: {fail: $f}}' \
+            | gh api repos/vsbotu/smoketest/actions/workflows/smoke-test.yml/dispatches --method POST --input -
+
+          RUN_ID=""
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            RUN_ID="$(gh run list --repo vsbotu/smoketest --workflow smoke-test.yml --branch main --limit 1 --json databaseId --jq '.[0].databaseId')"
+            if [ -n "$RUN_ID" ] && [ "$RUN_ID" != "null" ]; then
+              break
+            fi
+            sleep 2
+          done
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+            echo "::error::Could not find smoketest run after dispatch. Check SMOKETEST_TRIGGER_TOKEN."
+            exit 1
+          fi
+
+          echo "Watching smoketest run: https://github.com/vsbotu/smoketest/actions/runs/${RUN_ID}"
+          gh run watch "$RUN_ID" --repo vsbotu/smoketest --exit-status
+
+      - name: Write smoke metadata for rollback
+        if: always()
+        run: |
+          set -euo pipefail
+          NS='${{ inputs.namespace }}'
+          if [ "${{ steps.dispatch.outcome }}" = "success" ]; then
+            NEEDS=false
+          else
+            NEEDS=true
+          fi
+          printf '{"needs_rollback":"%s","namespace":"%s"}\n' "$NEEDS" "$NS" > smoke-meta.json
+          cat smoke-meta.json
+
+      - name: Upload smoke metadata
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-meta
+          path: smoke-meta.json
+          if-no-files-found: warn
+
+      - name: Fail if smoketest failed (triggers rollback path)
+        if: ${{ steps.dispatch.outcome != 'success' }}
+        run: |
+          echo "::error::Smoketest failed — rollback will run if revisions exist"
+          exit 1
 
   evaluate_rollback:
     name: Evaluate rollback
